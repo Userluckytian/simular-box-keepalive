@@ -9,6 +9,16 @@
 
 > ⚠️ 仅用于保活你自己名下、有权操作的 Simular Box。请勿用于其他目的。
 
+## 为什么保活和授权都必须在 Actions 上做
+
+实测（原仓库记录 + 本仓库复现）：Simular Box 无直连出网，唯一出口是本机
+`127.0.0.1:3128` 代理，且该代理**封禁 `mcp.box.simular.ai` 控制面**（平台防自唤醒）。
+所以：
+
+- `box_status` / `box_wake` 活动信号只能从盒子之外发起 → Actions runner；
+- OAuth 的 code → token 兑换同样会被盒子代理拦下（502 tunnel）→ 也放到 Actions
+  （`oauth-exchange` 工作流），因此本仓库**自带授权/换绑能力**，不依赖原版脚本。
+
 ## 与原版的差异
 
 | | 原版（JoeNik） | 本仓库 |
@@ -16,6 +26,7 @@
 | 运行位置 | 常开 Linux 服务器（systemd service + timer） | GitHub Actions（cron 每 15 分钟 + 手动触发） |
 | refresh token 存放 | 服务器 `/etc/simular-keepalive.env`（0600） | Repository Secret，**轮换后自动写回** |
 | 轮换处理 | 刷新后立刻写回 env 文件 | `gh secret set` 写回 Secret（需要 `ROTATE_TOKEN`） |
+| 授权 | 脚本 authorize + localhost 回调服务器 | `authorize.py` 生成链接 + `oauth-exchange` 工作流兑换 |
 | 依赖 | Python 标准库 | Python 标准库 + runner 预装的 gh CLI |
 
 Simular 的 OAuth 是**单活跃轮换**：每次用 refresh token 换 access token 时，响应里
@@ -25,7 +36,7 @@ Simular 的 OAuth 是**单活跃轮换**：每次用 refresh token 换 access to
 
 ## 部署步骤
 
-1. **Fork 或使用本仓库**（公开仓库 Actions 免费额度不限时）。
+1. **使用本仓库**（公开仓库 Actions 免费额度不限时）。
 
 2. **配置 Repository Secrets**（Settings → Secrets and variables → Actions）：
 
@@ -35,15 +46,20 @@ Simular 的 OAuth 是**单活跃轮换**：每次用 refresh token 换 access to
    | `ROTATE_TOKEN` | 一个对**本仓库有管理权限**的 GitHub PAT（经典 token，勾选 `repo` scope），用于轮换后写回 Secret |
    | `SIMULAR_BOX_ID` | 可选。目标 box id（`cb-xxxxxxxx`）。留空 = 账户默认 box |
 
-3. **授权获取 refresh token**（只需一次）：在任意能开浏览器的机器上运行
-   原版脚本的 authorize 子命令：
+3. **授权获取 refresh token**（只需一次；换绑/续期时重跑同样三步）：
 
    ```bash
-   python3 simular_keepalive.py authorize --port 51777 --box-id cb-xxxxxxxx
-   # 浏览器打开打印的链接完成授权；回调落在 localhost:51777 即成功
-   # 之后从 /etc/simular-keepalive.env 或 ~/simular-keepalive.env 读取
-   # SIMULAR_REFRESH_TOKEN= 的值，填入仓库 Secret
+   # 在任意装有 gh CLI 且已登录的机器上（含保活目标盒子里也可以——
+   # authorize.py 只调 api.github.com，不碰被封锁的控制面）：
+   GH_REPO=<你的用户名>/simular-box-keepalive python3 authorize.py
    ```
+
+   - 脚本会打印授权链接，并把 PKCE verifier 写入 Secret `TEMP_VERIFIER`；
+   - 浏览器打开链接，登录 Simular 并授权；
+   - 浏览器跳到 `localhost:51777`（**打不开是预期**），复制地址栏完整 URL；
+   - 到 Actions → **oauth-exchange** → Run workflow，把 URL 粘贴进 `callback_url`
+     运行。runner 上完成兑换并把 refresh token 写入 `SIMULAR_REFRESH_TOKEN`
+     （全程不打印明文 token；`TEMP_VERIFIER` 用后即删）。
 
 4. **手动触发一次验证**：Actions → simular-box-keepalive → Run workflow。
    预期日志：
@@ -53,7 +69,7 @@ Simular 的 OAuth 是**单活跃轮换**：每次用 refresh token 换 access to
    refresh token 已轮换，写回 Secret SIMULAR_REFRESH_TOKEN …
    Secret 写回完成。
    MCP 已连接: …
-   state=running box=cb-… 
+   state=running box=cb-…
    ok（本次活动信号已发送）。
    ```
 
@@ -69,12 +85,11 @@ Simular 的 OAuth 是**单活跃轮换**：每次用 refresh token 换 access to
 
 ## 安全说明
 
-- `SIMULAR_REFRESH_TOKEN` / `ROTATE_TOKEN` 只存 GitHub 加密的 Secrets，
-  日志中自动打码；不要写入代码或提交记录。
+- `SIMULAR_REFRESH_TOKEN` / `ROTATE_TOKEN` / `TEMP_VERIFIER` 只存 GitHub 加密的
+  Secrets，日志中自动打码；不要写入代码或提交记录。
 - `ROTATE_TOKEN` 建议专用、最小授权（经典 PAT 勾 `repo` 即可满足写 Secret 权限）；
   泄露时在 GitHub 设置中吊销并重置仓库 Secrets。
-- refresh token 一旦因运行失败（如轮换写回中断）而失配，重新跑一遍 authorize
-  并更新 `SIMULAR_REFRESH_TOKEN` 即可恢复。
+- refresh token 一旦因运行失败（如轮换写回中断）而失配，重跑「授权」三步即可恢复。
 - 保活不等于备份：重要数据仍需 `box_save` / 快照独立备份。
 
 ## 致谢与来源
