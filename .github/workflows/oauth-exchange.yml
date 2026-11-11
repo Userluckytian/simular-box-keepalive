@@ -1,17 +1,19 @@
 name: oauth-exchange
 
-# 一次性授权兑换工作流：把浏览器授权得到的回调 URL 里的 code，
-# 在 GitHub runner（不受 Simular Box 出网代理限制）上兑换成 token，
-# 并把 refresh token 写入 Repository Secret SIMULAR_REFRESH_TOKEN。
-# 使用前先在任一装有 gh 的机器上运行 authorize.py 生成链接并写入 TEMP_VERIFIER。
+# 一次性授权兑换工作流（完整流程见 authorize.py 文档头）：
+#   1) 任一装有 gh CLI 的机器运行 authorize.py → 打印授权链接 + 写入 TEMP_VERIFIER
+#   2) 浏览器授权后，把跳转到的 localhost:51777 URL 粘贴进 callback_url 触发本工作流
+#   3) GitHub runner（不受盒子出网代理限制）完成兑换，
+#      refresh token 写入 SIMULAR_REFRESH_TOKEN（全程打码，不打印明文）
+# 兑换逻辑在 oauth_exchange.py，本文件保持极简。
 
 on:
   workflow_dispatch:
     inputs:
       callback_url:
-        description: '授权后浏览器跳转的完整回调 URL（含 code=…），或直接粘贴 code 值'
+        description: "授权后浏览器跳转的完整 URL（含 code=...），或直接粘贴 code 值"
         required: true
-        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -25,64 +27,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - uses: actions/checkout@v4
+
       - name: 兑换 code 并写入 SIMULAR_REFRESH_TOKEN
         env:
-          RAW_CALLBACK: ${{ inputs.callback_url }}
+          RAW_CALLBACK: ${{ github.event.inputs.callback_url }}
           TEMP_VERIFIER: ${{ secrets.TEMP_VERIFIER }}
           ROTATE_TOKEN: ${{ secrets.ROTATE_TOKEN }}
           GH_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          if [ -z "$TEMP_VERIFIER" ]; then
-            echo "::error::缺少 Secret TEMP_VERIFIER——先运行 authorize.py 生成新的授权链接"
-            exit 2
-          fi
-          CODE=$(printf '%s' "$RAW_CALLBACK" | python3 -c '
-import sys, urllib.parse
-s = sys.stdin.read().strip()
-if "code=" in s:
-    q = urllib.parse.parse_qs(urllib.parse.urlparse(s).query)
-    print(q["code"][0])
-else:
-    print(s)
-')
-          echo "code 提取完成（长度 ${#CODE}）"
-          RESP=$(curl -sS -X POST https://mcp.box.simular.ai/oauth/token \
-            -H "Content-Type: application/x-www-form-urlencoded" \
-            --data-urlencode "grant_type=authorization_code" \
-            --data-urlencode "client_id=https://claude.ai/oauth/claude-code-client-metadata" \
-            --data-urlencode "code=$CODE" \
-            --data-urlencode "redirect_uri=http://localhost:51777/callback" \
-            --data-urlencode "code_verifier=$TEMP_VERIFIER" \
-            --data-urlencode "resource=https://mcp.box.simular.ai/mcp")
-          RT=$(printf '%s' "$RESP" | python3 -c '
-import json,sys
-try:
-    d = json.load(sys.stdin)
-except Exception:
-    d = {}
-print(d.get("refresh_token", ""))
-') || RT=""
-          AT=$(printf '%s' "$RESP" | python3 -c '
-import json,sys
-try:
-    d = json.load(sys.stdin)
-except Exception:
-    d = {}
-print(d.get("access_token", ""))
-') || AT=""
-          if [ -z "$RT" ]; then
-            echo "::error::兑换失败，脱敏响应如下（code 可能已过期，请重新 authorize.py）："
-            printf '%s' "$RESP" | sed -E 's/("(refresh_token|access_token|id_token)")[[:space:]]*:[[:space:]]*"[^"]*"/\1: "***"/g'
-            exit 1
-          fi
-          echo "::add-mask::$RT"
-          echo "::add-mask::$AT"
-          if [ -z "$ROTATE_TOKEN" ]; then
-            echo "::error::兑换成功但缺少 Secret ROTATE_TOKEN，无法写回 SIMULAR_REFRESH_TOKEN"
-            exit 3
-          fi
-          GH_TOKEN="$ROTATE_TOKEN" gh secret set SIMULAR_REFRESH_TOKEN --app actions --body "$RT"
-          echo "OK  SIMULAR_REFRESH_TOKEN 已写入"
-          GH_TOKEN="$ROTATE_TOKEN" gh secret delete TEMP_VERIFIER --app actions || true
-          echo "OK  TEMP_VERIFIER 已清理（一次性凭据）"
+        run: python3 oauth_exchange.py
