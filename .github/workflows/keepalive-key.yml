@@ -1,0 +1,41 @@
+name: simular-box-keepalive
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: simular-box-keepalive
+  cancel-in-progress: false
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Send activity signal (box_status) + auto-wake
+        env:
+          SIMULAR_KEY: ${{ secrets.SIMULAR_KEY }}
+          SIMULAR_BOX: ${{ secrets.SIMULAR_BOX }}
+        run: python3 -u simular_keepalive_key.py
+
+      - name: Record last run timestamp
+        if: success()
+        run: |
+          H=$(date -u +%H)
+          if [ $((10#$H % 6)) -eq 0 ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            date -u +"%Y-%m-%dT%H:%M:%SZ" > .last-run
+            git add .last-run
+            git commit -m "chore: keepalive timestamp" || echo "nothing to commit"
+            git push
+          else
+            echo "skip: not an every-6h slot"
+          fi
