@@ -1,0 +1,6 @@
+# 本地调试产物，勿提交
+*.env
+*.env.*
+token.json
+__pycache__/
+*.pyc

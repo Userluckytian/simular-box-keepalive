@@ -1,0 +1,47 @@
+name: simular-box-keepalive
+
+on:
+  schedule:
+    # 每 15 分钟一次（UTC）。GitHub 定时任务可能有数分钟延迟，
+    # 15 分钟 + 延迟仍远小于平台约 35 分钟的外部活动休眠阈值。
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: simular-box-keepalive
+  cancel-in-progress: false
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run keepalive (status signal + auto-wake + token rotation)
+        env:
+          SIMULAR_REFRESH_TOKEN: ${{ secrets.SIMULAR_REFRESH_TOKEN }}
+          SIMULAR_BOX_ID: ${{ secrets.SIMULAR_BOX_ID }}
+          ROTATE_TOKEN: ${{ secrets.ROTATE_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: python3 keepalive.py
+
+      # 每 6 小时更新一次 .last-run（保留仓库活动记录，避免 60 天无活动
+      # 被 GitHub 停用定时任务；同时作为人工可读的健康标记）。
+      - name: Record last run timestamp
+        if: success()
+        run: |
+          H=$(date -u +%H)
+          if [ $((10#$H % 6)) -eq 0 ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            date -u +"%Y-%m-%dT%H:%M:%SZ" > .last-run
+            git add .last-run
+            git commit -m "chore: keepalive timestamp" || echo "nothing to commit"
+            git push
+          else
+            echo "skip: not an every-6h slot"
+          fi
